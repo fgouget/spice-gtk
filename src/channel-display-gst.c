@@ -108,7 +108,16 @@ static gboolean construct_pipeline(SpiceGstDecoder *decoder)
     decoder->pipeline_wait = TRUE;
     decoder->samples_count = 0;
 
-    const gchar *src_caps, *gstdec_name;
+    /* Note that we cannot rely on typefind to always identify the stream type
+     * (e.g. VP8). So always set the source caps for streams we know about.
+     * See: https://bugzilla.gnome.org/show_bug.cgi?id=756457
+     *
+     * Furthermore decodebin will use vaapi if installed, which for a time
+     * could intentionally crash the application. So only use decodebin as a
+     * fallback for now. See: https://bugs.freedesktop.org/show_bug.cgi?id=90884
+     */
+    const gchar *src_caps;
+    const gchar *gstdec_name = NULL;
     switch (decoder->base.codec_type) {
     case SPICE_VIDEO_CODEC_TYPE_MJPEG:
         src_caps = "caps=image/jpeg";
@@ -123,8 +132,14 @@ static gboolean construct_pipeline(SpiceGstDecoder *decoder)
         gstdec_name = "h264parse ! avdec_h264";
         break;
     default:
-        spice_warning("Unknown codec type %d", decoder->base.codec_type);
-        return -1;
+        SPICE_DEBUG("Unknown codec type %d. Trying decodebin.",
+                    decoder->base.codec_type);
+        src_caps = "";
+        break;
+    }
+    /* Set SPICE_GSTVIDEO_AUTO to test decodebin and maybe get hardware acceleration */
+    if (!gstdec_name || getenv("SPICE_GSTVIDEO_AUTO")) {
+        gstdec_name = "decodebin";
     }
 
     GError *err = NULL;
