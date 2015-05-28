@@ -46,10 +46,42 @@ typedef struct SpiceGstDecoder {
 
     /* ---------- Output frame data ---------- */
 
+    GMutex pipeline_mutex;
+    GCond pipeline_cond;
+    gboolean pipeline_wait;
+    uint32_t samples_count;
+
     GstBuffer *buffer;
     GstMapInfo mapinfo;
 } SpiceGstDecoder;
 
+
+/* Signals that the pipeline is done processing the last buffer we gave it.
+ *
+ * @decoder:   The video decoder object.
+ * @samples:   How many samples to add to the available samples count.
+ */
+static void signal_pipeline(SpiceGstDecoder *decoder, uint32_t samples)
+{
+    g_mutex_lock(&decoder->pipeline_mutex);
+    decoder->pipeline_wait = FALSE;
+    decoder->samples_count += samples;
+    g_cond_signal(&decoder->pipeline_cond);
+    g_mutex_unlock(&decoder->pipeline_mutex);
+}
+
+static void appsrc_need_data_cb(GstAppSrc *src, guint length, gpointer user_data)
+{
+    SpiceGstDecoder *decoder = (SpiceGstDecoder*)user_data;
+    signal_pipeline(decoder, 0);
+}
+
+static GstFlowReturn appsink_new_sample_cb(GstAppSink *appsrc, gpointer user_data)
+{
+    SpiceGstDecoder *decoder = (SpiceGstDecoder*)user_data;
+    signal_pipeline(decoder, 1);
+    return GST_FLOW_OK;
+}
 
 /* ---------- GStreamer pipeline ---------- */
 
@@ -64,10 +96,18 @@ static void reset_pipeline(SpiceGstDecoder *decoder)
     gst_object_unref(decoder->appsink);
     gst_object_unref(decoder->pipeline);
     decoder->pipeline = NULL;
+
+    g_mutex_clear(&decoder->pipeline_mutex);
+    g_cond_clear(&decoder->pipeline_cond);
 }
 
 static gboolean construct_pipeline(SpiceGstDecoder *decoder)
 {
+    g_mutex_init(&decoder->pipeline_mutex);
+    g_cond_init(&decoder->pipeline_cond);
+    decoder->pipeline_wait = TRUE;
+    decoder->samples_count = 0;
+
     const gchar *src_caps, *gstdec_name;
     switch (decoder->base.codec_type) {
     case SPICE_VIDEO_CODEC_TYPE_MJPEG:
@@ -99,7 +139,12 @@ static gboolean construct_pipeline(SpiceGstDecoder *decoder)
     }
 
     decoder->appsrc = GST_APP_SRC(gst_bin_get_by_name(GST_BIN(decoder->pipeline), "src"));
+    GstAppSrcCallbacks appsrc_cbs = {&appsrc_need_data_cb, NULL, NULL, {NULL}};
+    gst_app_src_set_callbacks(decoder->appsrc, &appsrc_cbs, decoder, NULL);
+
     decoder->appsink = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(decoder->pipeline), "sink"));
+    GstAppSinkCallbacks appsink_cbs = {NULL, NULL, &appsink_new_sample_cb, {NULL}};
+    gst_app_sink_set_callbacks(decoder->appsink, &appsink_cbs, decoder, NULL);
 
     if (gst_element_set_state(decoder->pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
         SPICE_DEBUG("GStreamer error: Unable to set the pipeline to the playing state.");
@@ -108,6 +153,11 @@ static gboolean construct_pipeline(SpiceGstDecoder *decoder)
     }
 
     return TRUE;
+}
+
+static void release_msg_in(gpointer data)
+{
+    spice_msg_in_unref((SpiceMsgIn*)data);
 }
 
 static gboolean push_compressed_buffer(SpiceGstDecoder *decoder,
@@ -120,8 +170,12 @@ static gboolean push_compressed_buffer(SpiceGstDecoder *decoder,
         return FALSE;
     }
 
-    GstBuffer *buffer = gst_buffer_new_allocate(NULL, size, NULL);
-    gst_buffer_fill(buffer, 0, data, size);
+    /* Reference frame_msg so it stays around until our 'deallocator' releases it */
+    spice_msg_in_ref(frame_msg);
+    GstBuffer *buffer = gst_buffer_new_wrapped_full(GST_MEMORY_FLAG_READONLY,
+                                                    data, size, 0, size,
+                                                    frame_msg, &release_msg_in);
+
     if (gst_app_src_push_buffer(decoder->appsrc, buffer) != GST_FLOW_OK) {
         SPICE_DEBUG("GStreamer error: unable to push frame of size %d", size);
         return FALSE;
@@ -198,8 +252,36 @@ static uint8_t* gst_decoder_decode_frame(VideoDecoder *video_decoder,
      */
     release_last_frame(decoder);
 
+    /* The pipeline may have called appsrc_need_data_cb() after we got the last
+     * output frame. This would cause us to return prematurely so reset
+     * pipeline_wait so we do wait for it to process this buffer.
+     */
+    g_mutex_lock(&decoder->pipeline_mutex);
+    decoder->pipeline_wait = TRUE;
+    g_mutex_unlock(&decoder->pipeline_mutex);
+    /* Note that it's possible for appsrc_need_data_cb() to get called between
+     * now and the pipeline wait. But this will at most cause a one frame delay.
+     */
+
     if (push_compressed_buffer(decoder, frame_msg)) {
-        return pull_raw_frame(decoder);
+        /* Wait for the pipeline to either produce a decoded frame, or ask
+         * for more data which means an error happened.
+         */
+        g_mutex_lock(&decoder->pipeline_mutex);
+        while (decoder->pipeline_wait) {
+            g_cond_wait(&decoder->pipeline_cond, &decoder->pipeline_mutex);
+        }
+        decoder->pipeline_wait = TRUE;
+        uint32_t samples = decoder->samples_count;
+        if (samples) {
+            decoder->samples_count--;
+        }
+        g_mutex_unlock(&decoder->pipeline_mutex);
+
+        /* If a decoded frame waits for us, return it */
+        if (samples) {
+            return pull_raw_frame(decoder);
+        }
     }
     return NULL;
 }
