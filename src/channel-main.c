@@ -427,7 +427,7 @@ static void spice_main_channel_reset(SpiceChannel *channel, gboolean migrating)
 
     /* This is not part of reset_agent, since the spice-server expects any
        pending multi-chunk messages to be completed by the client, even after
-       it has send an agent-disconnected msg as that is what the original
+       it has sent an agent-disconnected msg as that is what the original
        spicec did. Also see the TODO in server/reds.c reds_reset_vdp() */
     c->agent_tokens = 0;
     agent_free_msg_queue(SPICE_MAIN_CHANNEL(channel));

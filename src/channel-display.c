@@ -1402,7 +1402,7 @@ static void display_update_stream_report(SpiceDisplayChannel *channel, uint32_t 
  *         even after the mm_time is updated.
  *         When src-time << dst-time, a significant video frames loss will occur.
  *     (b) If src-time > dst-time
- *         Frames will be dropped till the mm-time will be updated.
+ *         Frames will be dropped till the mm-time is updated.
  * (case 2) mm-time is synced with dst-time, but frames that were in the command
  *         ring during migration still arrive (such frames hold src-time).
  *    (a) If src-time < dst-time
