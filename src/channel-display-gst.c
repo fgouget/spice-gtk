@@ -396,8 +396,7 @@ static void gst_decoder_queue_frame(VideoDecoder *video_decoder,
     }
 }
 
-G_GNUC_INTERNAL
-gboolean gstvideo_init(void)
+static gboolean gstvideo_init(void)
 {
     static int success = 0;
     if (!success) {
@@ -429,4 +428,18 @@ VideoDecoder* create_gstreamer_decoder(int codec_type, display_stream *stream)
     }
 
     return (VideoDecoder*)decoder;
+}
+
+G_GNUC_INTERNAL
+gboolean gstvideo_has_codec(int codec_type)
+{
+    gboolean has_codec = FALSE;
+
+    VideoDecoder *decoder = create_gstreamer_decoder(codec_type, NULL);
+    if (decoder) {
+        has_codec = construct_pipeline((SpiceGstDecoder*)decoder);
+        decoder->destroy(decoder);
+    }
+
+    return has_codec;
 }
