@@ -52,7 +52,8 @@ typedef struct SpiceGstDecoder {
 
     /* ---------- Display queue ---------- */
 
-    GAsyncQueue *display_queue;
+    GMutex display_mutex;
+    GQueue *display_queue;
     guint timer_id;
 } SpiceGstDecoder;
 
@@ -171,6 +172,28 @@ static void decoder_unref(SpiceGstDecoder *decoder)
 
 /* ---------- GStreamer pipeline ---------- */
 
+static GstSample *pop_sample(SpiceGstDecoder *decoder)
+{
+    g_mutex_lock(&decoder->display_mutex);
+    GstSample *sample = g_queue_pop_head(decoder->display_queue);
+    g_mutex_unlock(&decoder->display_mutex);
+    return sample;
+}
+
+static void push_sample_head(SpiceGstDecoder *decoder, GstSample *sample)
+{
+    g_mutex_lock(&decoder->display_mutex);
+    g_queue_push_head(decoder->display_queue, sample);
+    g_mutex_unlock(&decoder->display_mutex);
+}
+
+static void push_sample_tail(SpiceGstDecoder *decoder, GstSample *sample)
+{
+    g_mutex_lock(&decoder->display_mutex);
+    g_queue_push_tail(decoder->display_queue, sample);
+    g_mutex_unlock(&decoder->display_mutex);
+}
+
 static void schedule_frame(SpiceGstDecoder *decoder);
 
 /* main context */
@@ -180,7 +203,7 @@ static gboolean display_frame(gpointer video_decoder)
 
     decoder->timer_id = 0;
     if (decoder->appsink) {
-        GstSample *sample = g_async_queue_try_pop(decoder->display_queue);
+        GstSample *sample = pop_sample(decoder);
         if (!sample) {
             spice_warning("GStreamer error: display_frame() got no frame to display");
             return G_SOURCE_REMOVE;
@@ -211,7 +234,7 @@ static void schedule_frame(SpiceGstDecoder *decoder)
 {
     guint32 time = stream_get_time(decoder->base.stream);
     while (!decoder->timer_id) {
-        GstSample *sample = g_async_queue_try_pop(decoder->display_queue);
+        GstSample *sample = pop_sample(decoder);
         if (!sample) {
             break;
         }
@@ -228,7 +251,7 @@ static void schedule_frame(SpiceGstDecoder *decoder)
         SpiceStreamDataHeader *op = spice_msg_in_parsed(frame_meta->msg);
         if (time < op->multi_media_time) {
             guint32 d = op->multi_media_time - time;
-            g_async_queue_push_front(decoder->display_queue, sample);
+            push_sample_head(decoder, sample);
             decoder->timer_id = g_timeout_add(d, display_frame, decoder);
 
         } else {
@@ -260,7 +283,7 @@ GstFlowReturn new_sample(GstAppSink *gstappsink, gpointer video_decoder)
          * schedule_frame() or display_frame() runs.
          */
         decoder_ref(decoder);
-        g_async_queue_push(decoder->display_queue, sample);
+        push_sample_tail(decoder, sample);
         schedule_frame(decoder);
     } else {
         spice_warning("GStreamer error: could not pull sample");
@@ -393,11 +416,12 @@ static void spice_gst_decoder_destroy(VideoDecoder *video_decoder)
         decoder->timer_id = 0;
     }
     GstSample *sample;
-    while ((sample = g_async_queue_try_pop(decoder->display_queue))) {
+    while ((sample = pop_sample(decoder))) {
         gst_sample_unref(sample);
         decoder_unref(decoder);
     }
-    g_async_queue_unref(decoder->display_queue);
+    g_mutex_clear(&decoder->display_mutex);
+    g_queue_free(decoder->display_queue);
     decoder->display_queue = NULL;
 
     decoder_unref(decoder);
@@ -505,7 +529,8 @@ VideoDecoder* create_gstreamer_decoder(int codec_type, display_stream *stream)
         decoder->base.codec_type = codec_type;
         decoder->base.stream = stream;
         decoder->refs = 1;
-        decoder->display_queue = g_async_queue_new();
+        g_mutex_init(&decoder->display_mutex);
+        decoder->display_queue = g_queue_new();
     }
 
     return (VideoDecoder*)decoder;
