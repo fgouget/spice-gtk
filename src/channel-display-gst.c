@@ -231,10 +231,6 @@ static GstFlowReturn new_sample(GstAppSink *gstappsink, gpointer video_decoder)
         while (l) {
             gstframe = l->data;
             if (gstframe->timestamp == GST_BUFFER_PTS(buffer)) {
-                /* The frame is now ready for display */
-                gstframe->sample = sample;
-                g_queue_push_tail(decoder->display_queue, gstframe);
-
                 /* Now that we know there is a match, remove it and the older
                  * frames from the decoding queue.
                  */
@@ -253,8 +249,14 @@ static GstFlowReturn new_sample(GstAppSink *gstappsink, gpointer video_decoder)
             l = l->next;
         }
         if (!l) {
-            spice_warning("got an unexpected decoded buffer!");
-            gst_sample_unref(sample);
+            spice_warning("got an unidentified decoded buffer! (queue length %u)", g_queue_get_length(decoder->decoding_queue));
+            /* Assume it's the first one in the queue */
+            gstframe = g_queue_pop_head(decoder->decoding_queue);
+        }
+        if (gstframe) {
+            /* The frame is now ready for display */
+            gstframe->sample = sample;
+            g_queue_push_tail(decoder->display_queue, gstframe);
         }
 
         g_mutex_unlock(&decoder->queues_mutex);
