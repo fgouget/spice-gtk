@@ -238,10 +238,14 @@ static GstFlowReturn new_sample(GstAppSink *gstappsink, gpointer video_decoder)
                     if (gstframe->timestamp == GST_BUFFER_PTS(buffer)) {
                         break;
                     }
-                    /* The GStreamer pipeline dropped the corresponding
-                     * buffer.
+                    /* The GStreamer pipeline dropped this buffer so we cannot
+                     * display this frame. But we should still invalidate the
+                     * corresponding area so it gets refreshed later on.
                      */
                     SPICE_DEBUG("the GStreamer pipeline dropped a frame");
+                    stream_display_frame(decoder->base.stream, gstframe->frame,
+                                         0, 0, NULL);
+                    stream_dropped_frame_on_playback(decoder->base.stream);
                     free_gst_frame(gstframe);
                 }
                 break;

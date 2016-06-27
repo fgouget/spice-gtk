@@ -1300,19 +1300,21 @@ G_GNUC_INTERNAL
 void stream_display_frame(display_stream *st, SpiceFrame *frame,
                           uint32_t width, uint32_t height, uint8_t *data)
 {
-    int stride = width * sizeof(uint32_t);
-    if (!(st->flags & SPICE_STREAM_FLAGS_TOP_DOWN)) {
-        data += stride * (height - 1);
-        stride = -stride;
-    }
+    if (data) {
+        int stride = width * sizeof(uint32_t);
+        if (!(st->flags & SPICE_STREAM_FLAGS_TOP_DOWN)) {
+            data += stride * (height - 1);
+            stride = -stride;
+        }
 
-    st->surface->canvas->ops->put_image(st->surface->canvas,
+        st->surface->canvas->ops->put_image(st->surface->canvas,
 #ifdef G_OS_WIN32
-                                        SPICE_DISPLAY_CHANNEL(st->channel)->priv->dc,
+                                            SPICE_DISPLAY_CHANNEL(st->channel)->priv->dc,
 #endif
-                                        &frame->dest, data,
-                                        width, height, stride,
-                                        st->have_region ? &st->region : NULL);
+                                            &frame->dest, data,
+                                            width, height, stride,
+                                            st->have_region ? &st->region : NULL);
+    }
 
     if (st->surface->primary) {
         g_signal_emit(st->channel, signals[SPICE_DISPLAY_INVALIDATE], 0,
